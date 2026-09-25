@@ -23,6 +23,10 @@ import truststore
 from bs4 import BeautifulSoup
 from cachetools import TTLCache
 from fastmcp import FastMCP
+from fastmcp.exceptions import AuthorizationError
+from fastmcp.server.auth.providers.github import GitHubProvider
+from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 # stdout is the MCP stdio channel; log to stderr only.
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -63,20 +67,62 @@ TOPICS = [
 _feed_cache: TTLCache = TTLCache(maxsize=64, ttl=300)
 _article_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
 
-mcp = FastMCP("lemonde")
+# Remote mode (Claude web/mobile connector) is enabled when PUBLIC_URL is set.
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
+ALLOWED_GITHUB_LOGIN = os.environ.get("ALLOWED_GITHUB_LOGIN", "").strip().lower()
+CLAUDE_REDIRECT_URIS = [
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
+]
+
+
+class OwnerOnly(Middleware):
+    # Any GitHub user can complete OAuth; only the owner may use the server.
+    async def on_request(self, context: MiddlewareContext, call_next):
+        token = get_access_token()
+        login = str((token.claims or {}).get("login") or "").lower() if token else ""
+        if login != ALLOWED_GITHUB_LOGIN:
+            log.warning("Rejected request from GitHub user %r", login)
+            raise AuthorizationError("This Le Monde connector is private.")
+        return await call_next(context)
+
+
+def _build_mcp() -> FastMCP:
+    if not PUBLIC_URL:
+        return FastMCP("lemonde")
+    if not ALLOWED_GITHUB_LOGIN:
+        raise RuntimeError("ALLOWED_GITHUB_LOGIN must be set in remote mode.")
+    auth = GitHubProvider(
+        client_id=os.environ["GITHUB_CLIENT_ID"],
+        client_secret=os.environ["GITHUB_CLIENT_SECRET"],
+        base_url=PUBLIC_URL,
+        jwt_signing_key=os.environ.get("JWT_SIGNING_KEY"),
+        allowed_client_redirect_uris=CLAUDE_REDIRECT_URIS,
+    )
+    return FastMCP("lemonde", auth=auth, middleware=[OwnerOnly()])
+
+
+mcp = _build_mcp()
 
 
 # ---------------------------------------------------------------------------
 # Auth / HTTP
 # ---------------------------------------------------------------------------
+def _keychain(service: str, account: str) -> str | None:
+    try:
+        return keyring.get_password(service, account)
+    except keyring.errors.KeyringError:
+        return None
+
+
 def _get_cookie() -> str | None:
-    return os.environ.get("LEMONDE_COOKIE") or keyring.get_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+    return os.environ.get("LEMONDE_COOKIE") or _keychain(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
 
 
 def _ensure_typesafe_key() -> None:
     if os.environ.get("TYPESAFE_API_KEY"):
         return
-    value = keyring.get_password("typesafe-shared", "api_key")
+    value = _keychain("typesafe-shared", "api_key")
     if not value:
         raise ValueError("TypeSafe API key not found. Set TYPESAFE_API_KEY or run scripts/bootstrap_typesafe_key.sh.")
     os.environ["TYPESAFE_API_KEY"] = value
@@ -252,4 +298,7 @@ def triage_news(interests: str, sections: list[str] | None = None, limit: int = 
 
 
 if __name__ == "__main__":
-    mcp.run()
+    if PUBLIC_URL:
+        mcp.run(transport="http", host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
+    else:
+        mcp.run()

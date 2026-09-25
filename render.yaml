@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: lemonde-mcp
+    runtime: docker
+    plan: free
+    envVars:
+      - key: PUBLIC_URL
+        sync: false
+      - key: ALLOWED_GITHUB_LOGIN
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: JWT_SIGNING_KEY
+        generateValue: true
+      - key: LEMONDE_COOKIE
+        sync: false
+      - key: TYPESAFE_API_KEY
+        sync: false
