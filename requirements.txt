@@ -1,8 +1,9 @@
-fastmcp>=2.13.0
+fastmcp>=2.13.0,<5
 httpx>=0.27.0
 feedparser>=6.0.0
 beautifulsoup4>=4.12.0
 cachetools>=5.3.0
 keyring>=24.0.0
 truststore>=0.9.0
+redis>=5.0.0  # remote mode: persistent OAuth state (REDIS_URL)
 typesafe-sdk>=0.7.1  # Jev, only needed for triage_news

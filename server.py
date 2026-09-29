@@ -27,6 +27,8 @@ from fastmcp.exceptions import AuthorizationError
 from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 # stdout is the MCP stdio channel; log to stderr only.
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -70,6 +72,9 @@ _article_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
 # Remote mode (Claude web/mobile connector) is enabled when PUBLIC_URL is set.
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
 ALLOWED_GITHUB_LOGIN = os.environ.get("ALLOWED_GITHUB_LOGIN", "").strip().lower()
+# OAuth state (Claude's client registration, issued tokens) must survive restarts, otherwise the
+# mobile app is logged out every time the host sleeps. Any redis:// or rediss:// URL works.
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
 CLAUDE_REDIRECT_URIS = [
     "https://claude.ai/api/mcp/auth_callback",
     "https://claude.com/api/mcp/auth_callback",
@@ -87,19 +92,43 @@ class OwnerOnly(Middleware):
         return await call_next(context)
 
 
+def _oauth_storage(jwt_signing_key: str):
+    if not REDIS_URL:
+        log.warning("REDIS_URL not set: OAuth state is kept on local disk and lost on restart.")
+        return None
+    from key_value.aio.stores.redis import RedisStore
+    from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+
+    return FernetEncryptionWrapper(
+        key_value=RedisStore(url=REDIS_URL),
+        source_material=jwt_signing_key,
+        salt="lemonde-mcp-oauth-storage",
+    )
+
+
 def _build_mcp() -> FastMCP:
     if not PUBLIC_URL:
         return FastMCP("lemonde")
     if not ALLOWED_GITHUB_LOGIN:
         raise RuntimeError("ALLOWED_GITHUB_LOGIN must be set in remote mode.")
+    jwt_signing_key = os.environ.get("JWT_SIGNING_KEY", "").strip()
+    if not jwt_signing_key:
+        raise RuntimeError("JWT_SIGNING_KEY must be set in remote mode (a stable random string).")
     auth = GitHubProvider(
         client_id=os.environ["GITHUB_CLIENT_ID"],
         client_secret=os.environ["GITHUB_CLIENT_SECRET"],
         base_url=PUBLIC_URL,
-        jwt_signing_key=os.environ.get("JWT_SIGNING_KEY"),
+        jwt_signing_key=jwt_signing_key,
+        client_storage=_oauth_storage(jwt_signing_key),
         allowed_client_redirect_uris=CLAUDE_REDIRECT_URIS,
     )
-    return FastMCP("lemonde", auth=auth, middleware=[OwnerOnly()])
+    server = FastMCP("lemonde", auth=auth, middleware=[OwnerOnly()])
+
+    @server.custom_route("/health", methods=["GET"])
+    async def health(_: Request) -> PlainTextResponse:
+        return PlainTextResponse("ok")
+
+    return server
 
 
 mcp = _build_mcp()

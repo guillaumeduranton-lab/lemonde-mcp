@@ -3,6 +3,7 @@ services:
     name: lemonde-mcp
     runtime: docker
     plan: free
+    healthCheckPath: /health
     envVars:
       - key: PUBLIC_URL
         sync: false
@@ -14,6 +15,8 @@ services:
         sync: false
       - key: JWT_SIGNING_KEY
         generateValue: true
+      - key: REDIS_URL
+        sync: false
       - key: LEMONDE_COOKIE
         sync: false
       - key: TYPESAFE_API_KEY
